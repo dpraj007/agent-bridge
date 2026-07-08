@@ -11,7 +11,7 @@ Coding agents store chats in different formats. Switching tools usually means lo
 Local only. Zero dependencies. No cloud.
 
 ```bash
-pip install agent-bridge
+pip install "git+https://github.com/dpraj007/agent-bridge.git"
 agent-bridge init
 agent-bridge install-skills
 agent-bridge sessions list
@@ -20,9 +20,10 @@ agent-bridge sessions list
 ## Install
 
 ```bash
-pip install agent-bridge
-# or from source
-pip install git+https://github.com/dpraj007/agent-bridge.git
+pip install "git+https://github.com/dpraj007/agent-bridge.git"
+# or clone
+git clone https://github.com/dpraj007/agent-bridge.git
+cd agent-bridge && pip install -e .
 ```
 
 ```bash

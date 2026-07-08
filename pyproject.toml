@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-bridge"
+version = "0.1.0"
+description = "Cross-agent session handoffs and native session catalog for Claude Code, Grok Build, and more"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dhairyasheel Patil", email = "dpraj007@users.noreply.github.com" }]
+keywords = [
+  "claude-code",
+  "grok",
+  "agents",
+  "sessions",
+  "handoff",
+  "ai-coding",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dpraj007/agent-bridge"
+Repository = "https://github.com/dpraj007/agent-bridge"
+Issues = "https://github.com/dpraj007/agent-bridge/issues"
+
+[project.scripts]
+agent-bridge = "agent_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agent_bridge = ["data/SKILL.md"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]

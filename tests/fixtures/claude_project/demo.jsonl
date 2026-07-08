@@ -1,0 +1,4 @@
+{"type":"mode","mode":"normal","sessionId":"demo-claude-001"}
+{"type":"ai-title","aiTitle":"Demo Claude session","sessionId":"demo-claude-001"}
+{"type":"user","message":{"role":"user","content":"Please help with a demo task"},"sessionId":"demo-claude-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure, happy to help."}]},"sessionId":"demo-claude-001"}

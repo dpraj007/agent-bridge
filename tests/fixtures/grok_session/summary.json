@@ -1,0 +1,13 @@
+{
+  "info": {
+    "id": "test-grok-session-001",
+    "cwd": "/tmp/demo"
+  },
+  "session_summary": "Demo Grok session",
+  "created_at": "2026-07-01T12:00:00Z",
+  "updated_at": "2026-07-01T13:00:00Z",
+  "num_messages": 4,
+  "num_chat_messages": 2,
+  "current_model_id": "grok-test",
+  "generated_title": "Demo Grok session"
+}

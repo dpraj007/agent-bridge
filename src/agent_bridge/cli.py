@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent-bridge — shared session handoff store for Grok Build + Claude Code.
+agent-bridge — shared session handoffs for Claude Code, Grok Build, and Codex.
 
 Full raw transcripts are not portable across harnesses. This tool stores
 structured handoffs both agents can save/load so work continues across tools.
@@ -31,8 +31,13 @@ NATIVE_MIRROR = HOME / "native-mirror"  # readable exports of peer sessions
 
 GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude"))
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 GROK_SESSIONS = GROK_HOME / "sessions"
 CLAUDE_PROJECTS = CLAUDE_HOME / "projects"
+CODEX_SESSIONS = CODEX_HOME / "sessions"
+CODEX_SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
+
+KNOWN_AGENTS = ("grok", "claude", "codex")
 
 
 def now_iso() -> str:
@@ -435,7 +440,8 @@ def _text_from_content(content: Any) -> str:
             if isinstance(block, str):
                 parts.append(block)
             elif isinstance(block, dict):
-                if block.get("type") == "text" and "text" in block:
+                btype = block.get("type")
+                if btype in ("text", "input_text", "output_text") and "text" in block:
                     parts.append(str(block["text"]))
                 elif "text" in block:
                     parts.append(str(block["text"]))
@@ -560,12 +566,151 @@ def scan_claude_sessions() -> list[dict[str, Any]]:
     return out
 
 
+def _load_codex_index() -> dict[str, dict[str, Any]]:
+    """Map session id → index row from ~/.codex/session_index.jsonl (optional)."""
+    by_id: dict[str, dict[str, Any]] = {}
+    if not CODEX_SESSION_INDEX.exists():
+        return by_id
+    try:
+        for line in CODEX_SESSION_INDEX.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            sid = o.get("id")
+            if sid:
+                by_id[str(sid)] = o
+    except OSError:
+        pass
+    return by_id
+
+
+def _is_noise_user_text(text: str) -> bool:
+    t = text.lstrip()
+    if not t:
+        return True
+    if t.startswith("# AGENTS.md") or t.startswith("<INSTRUCTIONS>"):
+        return True
+    if t.startswith("<environment_context>") or t.startswith("<permissions"):
+        return True
+    if t.startswith("# ") and "instructions for" in t[:80].lower():
+        return True
+    return False
+
+
+def scan_codex_sessions() -> list[dict[str, Any]]:
+    """Scan OpenAI Codex CLI rollouts under ~/.codex/sessions/**/rollout-*.jsonl."""
+    out: list[dict[str, Any]] = []
+    if not CODEX_SESSIONS.exists():
+        return out
+    index = _load_codex_index()
+    for jsonl in CODEX_SESSIONS.rglob("rollout-*.jsonl"):
+        try:
+            st = jsonl.stat()
+        except OSError:
+            continue
+        sid = ""
+        # Prefer UUID in filename: rollout-...-<uuid>.jsonl
+        m = re.search(
+            r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            jsonl.name,
+            re.I,
+        )
+        if m:
+            sid = m.group(1)
+        cwd = ""
+        created_at = ""
+        model = ""
+        first_user = ""
+        last_user = ""
+        n_user = 0
+        n_asst = 0
+        try:
+            with jsonl.open(encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    t = o.get("type")
+                    p = o.get("payload") or {}
+                    if t == "session_meta":
+                        sid = str(p.get("id") or sid)
+                        cwd = p.get("cwd") or cwd
+                        created_at = p.get("timestamp") or o.get("timestamp") or created_at
+                        model = p.get("model_provider") or model
+                    elif t == "response_item" and p.get("type") == "message":
+                        role = p.get("role")
+                        text = _text_from_content(p.get("content")).strip()
+                        if role == "user":
+                            n_user += 1
+                            if text and not _is_noise_user_text(text):
+                                if not first_user:
+                                    first_user = text[:240]
+                                last_user = text[:240]
+                        elif role == "assistant":
+                            n_asst += 1
+                    elif t == "event_msg" and p.get("type") == "user_message":
+                        # Some builds also emit user_message events
+                        text = _text_from_content(p.get("message") or p.get("content") or p).strip()
+                        if text and not _is_noise_user_text(text):
+                            if not first_user:
+                                first_user = text[:240]
+                            last_user = text[:240]
+        except OSError:
+            continue
+        if not sid:
+            sid = jsonl.stem
+        idx = index.get(sid) or {}
+        title = (
+            idx.get("thread_name")
+            or first_user
+            or sid
+        )
+        if isinstance(title, str):
+            title = title[:80]
+        updated = (
+            idx.get("updated_at")
+            or datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        out.append(
+            {
+                "agent": "codex",
+                "id": sid,
+                "title": title,
+                "summary": first_user,
+                "last_user": last_user,
+                "cwd": cwd,
+                "created_at": created_at,
+                "updated_at": updated,
+                "messages": n_user + n_asst,
+                "model": model,
+                "path": str(jsonl),
+                "summary_path": str(jsonl),
+                "mtime": st.st_mtime,
+            }
+        )
+    out.sort(key=lambda r: r.get("mtime") or 0, reverse=True)
+    return out
+
+
 def scan_native(agent: str = "all") -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if agent in ("all", "grok"):
         rows.extend(scan_grok_sessions())
     if agent in ("all", "claude"):
         rows.extend(scan_claude_sessions())
+    if agent in ("all", "codex"):
+        rows.extend(scan_codex_sessions())
     rows.sort(key=lambda r: r.get("mtime") or 0, reverse=True)
     return rows
 
@@ -576,16 +721,20 @@ def find_native(id_or_fragment: str, agent: str = "all") -> dict[str, Any] | Non
     for r in rows:
         if r["id"] == id_or_fragment:
             return r
-    # grok:id / claude:id
+    # agent:id
     if ":" in id_or_fragment:
         a, _, rest = id_or_fragment.partition(":")
-        return find_native(rest, a if a in ("grok", "claude") else agent)
-    matches = [r for r in rows if id_or_fragment in r["id"] or id_or_fragment.lower() in (r.get("title") or "").lower()]
+        return find_native(rest, a if a in KNOWN_AGENTS else agent)
+    matches = [
+        r
+        for r in rows
+        if id_or_fragment in r["id"]
+        or id_or_fragment.lower() in (r.get("title") or "").lower()
+    ]
     if not matches:
         return None
     if len(matches) == 1:
         return matches[0]
-    # prefer more recently updated
     matches.sort(key=lambda r: r.get("mtime") or 0, reverse=True)
     return matches[0]
 
@@ -652,6 +801,47 @@ def extract_claude_transcript(jsonl_path: Path, max_chars: int = 12000) -> str:
     return "\n".join(lines_out) if lines_out else "(no user/assistant messages extracted)"
 
 
+def extract_codex_transcript(jsonl_path: Path, max_chars: int = 12000) -> str:
+    lines_out: list[str] = []
+    total = 0
+    with jsonl_path.open(encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if o.get("type") != "response_item":
+                continue
+            p = o.get("payload") or {}
+            if p.get("type") != "message":
+                continue
+            role = p.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = _text_from_content(p.get("content")).strip()
+            if not text:
+                continue
+            if role == "user" and _is_noise_user_text(text):
+                continue
+            chunk = f"### {role}\n{text[:2000]}\n"
+            if total + len(chunk) > max_chars:
+                lines_out.append("\n…(truncated)…\n")
+                break
+            lines_out.append(chunk)
+            total += len(chunk)
+    return "\n".join(lines_out) if lines_out else "(no user/assistant messages extracted)"
+
+
+def extract_native_transcript(row: dict[str, Any], max_chars: int = 12000) -> str:
+    agent = row.get("agent")
+    path = Path(row["path"])
+    if agent == "grok":
+        return extract_grok_transcript(path, max_chars=max_chars)
+    if agent == "codex":
+        return extract_codex_transcript(path, max_chars=max_chars)
+    return extract_claude_transcript(path, max_chars=max_chars)
+
+
 def write_native_catalog(rows: list[dict[str, Any]]) -> None:
     ensure_dirs()
     # Strip heavy fields for json
@@ -661,12 +851,12 @@ def write_native_catalog(rows: list[dict[str, Any]]) -> None:
     NATIVE_CATALOG_JSON.write_text(json.dumps(slim, indent=2), encoding="utf-8")
 
     lines = [
-        "# Native sessions - Grok Build + Claude Code",
+        "# Native sessions - Claude Code + Grok Build + Codex",
         "",
         f"_Generated: {now_iso()}_",
         "",
-        "Both agents can list/show these via:",
-        "`python ~/.agent-bridge/bin/agent_bridge.py sessions list`",
+        "Agents can list/show these via:",
+        "`agent-bridge sessions list`",
         "",
         "| Agent | Updated | Title | Id | Msgs | Cwd |",
         "|-------|---------|-------|----|------|-----|",
@@ -681,7 +871,7 @@ def write_native_catalog(rows: list[dict[str, Any]]) -> None:
     lines.append("## Commands")
     lines.append("")
     lines.append("```text")
-    lines.append("sessions list [--agent grok|claude|all] [--limit N]")
+    lines.append("sessions list [--agent grok|claude|codex|all] [--limit N]")
     lines.append("sessions show <id|fragment>     # metadata + transcript excerpt")
     lines.append("sessions export <id>            # write handoff + mirror md")
     lines.append("sessions search <query>")
@@ -694,8 +884,10 @@ def write_native_catalog(rows: list[dict[str, Any]]) -> None:
     for dest in (
         GROK_HOME / "NATIVE_SESSIONS.md",
         CLAUDE_HOME / "NATIVE_SESSIONS.md",
+        CODEX_HOME / "NATIVE_SESSIONS.md",
         CLAUDE_HOME / "agent-bridge-sessions.md",
         GROK_HOME / "agent-bridge-sessions.md",
+        CODEX_HOME / "agent-bridge-sessions.md",
     ):
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -721,7 +913,7 @@ def cmd_sessions_list(args: argparse.Namespace) -> int:
         print(f"{r['agent']:<8} {updated:<20} {r.get('messages') or 0:>5}  {title:<40}  {r['id']}")
     print()
     print(f"Catalog: {NATIVE_CATALOG_MD}")
-    print(f"Also mirrored to ~/.grok/NATIVE_SESSIONS.md and ~/.claude/NATIVE_SESSIONS.md")
+    print("Also mirrored to ~/.claude, ~/.grok, and ~/.codex NATIVE_SESSIONS.md")
     return 0
 
 
@@ -744,10 +936,7 @@ def cmd_sessions_show(args: argparse.Namespace) -> int:
         return 0
     print("## Transcript excerpt")
     print()
-    if row["agent"] == "grok":
-        print(extract_grok_transcript(Path(row["path"]), max_chars=args.max_chars))
-    else:
-        print(extract_claude_transcript(Path(row["path"]), max_chars=args.max_chars))
+    print(extract_native_transcript(row, max_chars=args.max_chars))
     return 0
 
 
@@ -756,10 +945,7 @@ def cmd_sessions_export(args: argparse.Namespace) -> int:
     if not row:
         print(f"Session not found: {args.id}", file=sys.stderr)
         return 1
-    if row["agent"] == "grok":
-        excerpt = extract_grok_transcript(Path(row["path"]), max_chars=args.max_chars)
-    else:
-        excerpt = extract_claude_transcript(Path(row["path"]), max_chars=args.max_chars)
+    excerpt = extract_native_transcript(row, max_chars=args.max_chars)
 
     title = row.get("title") or row["id"]
     body = f"""# Handoff from native {row['agent']} session
@@ -850,9 +1036,14 @@ def cmd_sessions_sync(args: argparse.Namespace) -> int:
     print(f"  {NATIVE_CATALOG_JSON}")
     print(f"  ~/.grok/NATIVE_SESSIONS.md")
     print(f"  ~/.claude/NATIVE_SESSIONS.md")
+    print(f"  ~/.codex/NATIVE_SESSIONS.md")
     if args.export_recent:
         # Export N most recent from each agent so both sides have readable mirrors
-        by_agent: dict[str, list[dict[str, Any]]] = {"grok": [], "claude": []}
+        by_agent: dict[str, list[dict[str, Any]]] = {
+            "grok": [],
+            "claude": [],
+            "codex": [],
+        }
         for r in rows:
             a = r["agent"]
             if a in by_agent and len(by_agent[a]) < args.export_recent:
@@ -876,10 +1067,10 @@ CLI: `agent-bridge` (or `python -m agent_bridge`)
 
 ```text
 agent-bridge sessions list
-agent-bridge sessions list --agent grok
+agent-bridge sessions list --agent codex
 agent-bridge sessions show <id>
 agent-bridge sessions export <id>
-agent-bridge save --agent <claude|grok> --title "..." --body-file handoff.md
+agent-bridge save --agent <claude|grok|codex> --title "..." --body-file handoff.md
 agent-bridge load latest
 agent-bridge current
 ```
@@ -910,13 +1101,18 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
     body = skill_src.read_text(encoding="utf-8")
     only_claude = bool(getattr(args, "claude", False))
     only_grok = bool(getattr(args, "grok", False))
-    install_claude = only_claude or not (only_claude or only_grok)
-    install_grok = only_grok or not (only_claude or only_grok)
+    only_codex = bool(getattr(args, "codex", False))
+    any_only = only_claude or only_grok or only_codex
+    install_claude = only_claude or not any_only
+    install_grok = only_grok or not any_only
+    install_codex = only_codex or not any_only
     targets: list[Path] = []
     if install_claude:
         targets.append(CLAUDE_HOME / "skills" / "agent-bridge" / "SKILL.md")
     if install_grok:
         targets.append(GROK_HOME / "skills" / "agent-bridge" / "SKILL.md")
+    if install_codex:
+        targets.append(CODEX_HOME / "skills" / "agent-bridge" / "SKILL.md")
     for dest in targets:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(body, encoding="utf-8")
@@ -925,7 +1121,11 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
     if getattr(args, "wire_rules", False):
         marker_open = "<!-- agent-bridge -->"
         marker_close = "<!-- /agent-bridge -->"
-        for rules_path in (CLAUDE_HOME / "CLAUDE.md", GROK_HOME / "AGENTS.md"):
+        for rules_path in (
+            CLAUDE_HOME / "CLAUDE.md",
+            GROK_HOME / "AGENTS.md",
+            CODEX_HOME / "AGENTS.md",
+        ):
             try:
                 rules_path.parent.mkdir(parents=True, exist_ok=True)
                 existing = rules_path.read_text(encoding="utf-8") if rules_path.exists() else ""
@@ -955,18 +1155,26 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="Create ~/.agent-bridge layout")
     s.set_defaults(func=cmd_init)
 
-    s = sub.add_parser("install-skills", help="Install agent-bridge skill for Claude and/or Grok")
+    s = sub.add_parser(
+        "install-skills",
+        help="Install agent-bridge skill for Claude, Grok, and/or Codex",
+    )
     s.add_argument("--claude", action="store_true", help="Only Claude Code skill dir")
     s.add_argument("--grok", action="store_true", help="Only Grok skill dir")
+    s.add_argument("--codex", action="store_true", help="Only Codex skill dir")
     s.add_argument(
         "--wire-rules",
         action="store_true",
-        help="Append a short section to ~/.claude/CLAUDE.md and ~/.grok/AGENTS.md",
+        help="Append a short section to CLAUDE.md / AGENTS.md for each harness",
     )
     s.set_defaults(func=cmd_install_skills)
 
     s = sub.add_parser("save", help="Save a structured handoff")
-    s.add_argument("--agent", choices=["grok", "claude", "unknown", "other"], default=None)
+    s.add_argument(
+        "--agent",
+        choices=["grok", "claude", "codex", "unknown", "other"],
+        default=None,
+    )
     s.add_argument("--title", required=True)
     s.add_argument("--cwd", default=None)
     s.add_argument("--body-file", default=None)
@@ -1011,26 +1219,45 @@ def build_parser() -> argparse.ArgumentParser:
     nsub = ns.add_subparsers(dest="sessions_cmd", required=True)
 
     s = nsub.add_parser("list", help="List native sessions from both agents")
-    s.add_argument("--agent", choices=["all", "grok", "claude"], default="all")
+    s.add_argument(
+        "--agent",
+        choices=["all", "grok", "claude", "codex"],
+        default="all",
+    )
     s.add_argument("--limit", type=int, default=30)
     s.set_defaults(func=cmd_sessions_list)
 
     s = nsub.add_parser("show", help="Show metadata + transcript excerpt")
-    s.add_argument("id", help="Session id, fragment, or grok:<id> / claude:<id>")
-    s.add_argument("--agent", choices=["all", "grok", "claude"], default="all")
+    s.add_argument(
+        "id",
+        help="Session id, fragment, or grok:<id> / claude:<id> / codex:<id>",
+    )
+    s.add_argument(
+        "--agent",
+        choices=["all", "grok", "claude", "codex"],
+        default="all",
+    )
     s.add_argument("--meta-only", action="store_true")
     s.add_argument("--max-chars", type=int, default=12000)
     s.set_defaults(func=cmd_sessions_show)
 
     s = nsub.add_parser("export", help="Export native session to handoff + mirror")
     s.add_argument("id")
-    s.add_argument("--agent", choices=["all", "grok", "claude"], default="all")
+    s.add_argument(
+        "--agent",
+        choices=["all", "grok", "claude", "codex"],
+        default="all",
+    )
     s.add_argument("--max-chars", type=int, default=12000)
     s.set_defaults(func=cmd_sessions_export)
 
     s = nsub.add_parser("search", help="Search native session titles/summaries")
     s.add_argument("query")
-    s.add_argument("--agent", choices=["all", "grok", "claude"], default="all")
+    s.add_argument(
+        "--agent",
+        choices=["all", "grok", "claude", "codex"],
+        default="all",
+    )
     s.add_argument("--limit", type=int, default=30)
     s.set_defaults(func=cmd_sessions_search)
 

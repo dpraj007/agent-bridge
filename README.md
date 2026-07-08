@@ -1,14 +1,20 @@
 # agent-bridge
 
-**Cross-agent session handoffs** for [Claude Code](https://claude.ai/code), [Grok Build](https://x.ai), and friends.
+**Cross-agent session handoffs** for [Claude Code](https://claude.ai/code), [Grok Build](https://x.ai), [OpenAI Codex](https://github.com/openai/codex), and friends.
 
 Coding agents store chats in different formats. Switching tools usually means losing context. **agent-bridge** keeps a local, portable layer so you can:
 
-1. **See** sessions from the other agent (`sessions list` / `show`)
+1. **See** sessions from the other agents (`sessions list` / `show`)
 2. **Hand off** work mid-task (`save` / `load` / `CURRENT.md`)
 3. **Export** a native chat into a structured handoff
 
 Local only. Zero dependencies. No cloud.
+
+| Agent | Store scanned |
+|-------|----------------|
+| Claude Code | `~/.claude/projects/**/*.jsonl` |
+| Grok Build | `~/.grok/sessions/**` |
+| OpenAI Codex | `~/.codex/sessions/**/rollout-*.jsonl` |
 
 ```bash
 pip install "git+https://github.com/dpraj007/agent-bridge.git"
@@ -40,7 +46,9 @@ agent-bridge install-skills --wire-rules   # also append a short section to CLAU
 agent-bridge sessions list
 agent-bridge sessions list --agent grok
 agent-bridge sessions list --agent claude
+agent-bridge sessions list --agent codex
 agent-bridge sessions show <id-or-title-fragment>
+agent-bridge sessions show codex:<uuid>
 ```
 
 Catalogs are written to:
@@ -48,8 +56,9 @@ Catalogs are written to:
 - `~/.agent-bridge/NATIVE_SESSIONS.md`
 - `~/.claude/NATIVE_SESSIONS.md` (if present)
 - `~/.grok/NATIVE_SESSIONS.md` (if present)
+- `~/.codex/NATIVE_SESSIONS.md` (if present)
 
-> Claude’s `/resume` UI will not list Grok sessions natively (and reverse). Use this catalog instead.
+> One agent’s native resume UI will not list another’s sessions. Use this catalog instead.
 
 ### Hand off mid-task
 
@@ -89,14 +98,20 @@ Environment:
 | `AGENT_BRIDGE_HOME` | `~/.agent-bridge` |
 | `CLAUDE_HOME` | `~/.claude` |
 | `GROK_HOME` | `~/.grok` |
+| `CODEX_HOME` | `~/.codex` |
 
 ## How it works
 
 ```
-┌─────────────┐     handoffs + catalog      ┌─────────────┐
-│ Claude Code │◄───────────────────────────►│  Grok Build │
-│  *.jsonl    │     ~/.agent-bridge/        │  sessions/  │
-└─────────────┘                             └─────────────┘
+┌─────────────┐
+│ Claude Code │──┐
+└─────────────┘  │
+┌─────────────┐  │   handoffs + catalog    ┌──────────────┐
+│  Grok Build │──┼────────────────────────►│ agent-bridge │
+└─────────────┘  │      ~/.agent-bridge/   └──────────────┘
+┌─────────────┐  │
+│    Codex    │──┘
+└─────────────┘
 ```
 
 Raw transcripts are huge and format-incompatible. The bridge stores **structured handoffs** and a **session index with excerpts** both agents can run via shell.
